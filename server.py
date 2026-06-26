@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 BASE_URL = "https://api.amplemarket.com"
 API_KEY = os.environ.get("AMPLEMARKET_API_KEY", "")
-mcp = FastMCP("Amplemarket", port=8000)
+mcp = FastMCP("Amplemarket")
 
 def _headers():
     if not API_KEY: raise RuntimeError("AMPLEMARKET_API_KEY not set.")
@@ -301,4 +301,4 @@ def cancel_company_enrichment(enrichment_id: str) -> str:
     return json.dumps(_delete(f"/company-enrichments/{enrichment_id}"), indent=2)
 
 if __name__ == "__main__":
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=8000)
+    mcp.run(transport="streamable-http")
