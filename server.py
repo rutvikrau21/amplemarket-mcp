@@ -12,7 +12,7 @@ BASE_URL = "https://api.amplemarket.com"
 API_KEY = os.environ.get("AMPLEMARKET_API_KEY", "")
 mcp = FastMCP("Amplemarket", port=8000)
 
-def _headers():
+def _headers()
     if not API_KEY: raise RuntimeError("AMPLEMARKET_API_KEY not set.")
     return {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
 
@@ -301,4 +301,4 @@ def cancel_company_enrichment(enrichment_id: str) -> str:
     return json.dumps(_delete(f"/company-enrichments/{enrichment_id}"), indent=2)
 
 if __name__ == "__main__":
-    mcp.run(transport="sse")
+        mcp.run(transport="streamable-http")
