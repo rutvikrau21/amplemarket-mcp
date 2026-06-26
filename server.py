@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 BASE_URL = "https://api.amplemarket.com"
 API_KEY = os.environ.get("AMPLEMARKET_API_KEY", "")
-mcp = FastMCP("Amplemarket")
+mcp = FastMCP("Amplemarket", host="0.0.0.0", port=8000)
 
 def _headers():
     if not API_KEY: raise RuntimeError("AMPLEMARKET_API_KEY not set.")
