@@ -98,13 +98,94 @@ def list_sequences() -> str:
 
 @mcp.tool()
 def add_leads_to_sequence(sequence_id: str, leads: List[dict], mailboxes: Optional[List[str]]=None, leads_distribution: Optional[str]=None) -> str:
-    """Add leads to a sequence."""
+    """Add leads to a sequence. Each lead must be: {"email": "...", "data": {"first_name": "...", "company": "...", ...}}.
+    Use add_lead_to_sequence for a single lead with explicit fields, or import_csv_to_sequence to upload a CSV."""
     body = {"leads": leads}
     settings = {}
     if mailboxes: settings["mailboxes"] = mailboxes
     if leads_distribution: settings["leads_distribution"] = leads_distribution
     if settings: body["settings"] = settings
     return json.dumps(_post(f"/sequences/{sequence_id}/leads", body), indent=2)
+
+@mcp.tool()
+def add_lead_to_sequence(
+    sequence_id: str,
+    email: str,
+    first_name: Optional[str] = None,
+    last_name: Optional[str] = None,
+    company: Optional[str] = None,
+    city: Optional[str] = None,
+    linkedin_url: Optional[str] = None,
+    extra_fields: Optional[dict] = None,
+    mailboxes: Optional[List[str]] = None,
+) -> str:
+    """Add a single lead to a sequence with explicit fields.
+    Any sequence dynamic variables not covered above can be passed in extra_fields,
+    e.g. extra_fields={"use_case_1": "...", "practice_description": "..."}."""
+    data: dict = {}
+    if first_name: data["first_name"] = first_name
+    if last_name: data["last_name"] = last_name
+    if company: data["company"] = company
+    if city: data["city"] = city
+    if linkedin_url: data["linkedin_url"] = linkedin_url
+    if extra_fields: data.update(extra_fields)
+    lead: dict = {"email": email}
+    if data: lead["data"] = data
+    body: dict = {"leads": [lead]}
+    if mailboxes: body["settings"] = {"mailboxes": mailboxes}
+    return json.dumps(_post(f"/sequences/{sequence_id}/leads", body), indent=2)
+
+@mcp.tool()
+def import_csv_to_sequence(
+    sequence_id: str,
+    csv_content: str,
+    email_column: str = "email",
+    mailboxes: Optional[List[str]] = None,
+    leads_distribution: Optional[str] = None,
+) -> str:
+    """Import leads from raw CSV text into a sequence.
+    - csv_content: full CSV text including header row (copy-paste the file contents)
+    - email_column: name of the column containing email addresses (default: "email")
+    - All other columns are automatically passed as sequence dynamic fields (e.g. first_name, company, use_case_1)
+    - Handles batching automatically (20 leads per request)
+    Returns a summary of how many leads were added, skipped, or failed per batch."""
+    import csv, io
+    reader = csv.DictReader(io.StringIO(csv_content.strip()))
+    leads = []
+    for row in reader:
+        email = row.get(email_column, "").strip()
+        if not email:
+            continue
+        data = {k: v.strip() for k, v in row.items() if k != email_column and v and v.strip()}
+        lead: dict = {"email": email}
+        if data: lead["data"] = data
+        leads.append(lead)
+    if not leads:
+        return json.dumps({"error": f"No leads found. Check that email_column='{email_column}' matches a column header."})
+    settings: dict = {}
+    if mailboxes: settings["mailboxes"] = mailboxes
+    if leads_distribution: settings["leads_distribution"] = leads_distribution
+    results = []
+    for i in range(0, len(leads), 20):
+        batch = leads[i:i + 20]
+        body: dict = {"leads": batch}
+        if settings: body["settings"] = settings
+        result = _post(f"/sequences/{sequence_id}/leads", body)
+        results.append({"batch": i // 20 + 1, "sent": len(batch), **result})
+    total_added = sum(r.get("total_added_to_sequence", 0) for r in results)
+    skipped = sum(
+        len(r.get("in_exclusion_list_and_skipped", [])) +
+        len(r.get("recently_contacted_and_skipped", [])) +
+        len(r.get("already_in_sequence_and_skipped", [])) +
+        len(r.get("in_other_active_sequences_and_skipped", []))
+        for r in results
+    )
+    return json.dumps({
+        "total_leads_in_csv": len(leads),
+        "total_added_to_sequence": total_added,
+        "total_skipped": skipped,
+        "batches": results,
+    }, indent=2)
 
 @mcp.tool()
 def list_tasks(status: Optional[str]=None, task_type: Optional[str]=None, page: int=1) -> str:
