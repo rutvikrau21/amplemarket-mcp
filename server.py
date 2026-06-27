@@ -473,15 +473,18 @@ def cancel_email_validation(validation_id: str) -> str:
 
 @mcp.tool()
 def list_calls(
-    page: int = 1,
+    page_size: int = 20,
+    page_after: Optional[str] = None,
     user_id: Optional[str] = None,
     from_number: Optional[str] = None,
     to_number: Optional[str] = None,
     start_date_from: Optional[str] = None,
     start_date_to: Optional[str] = None,
 ) -> str:
-    """List logged calls. Date filters are ISO 8601 strings, e.g. '2024-01-15T00:00:00Z'."""
-    params: dict = {"page": page}
+    """List logged calls. Uses cursor pagination — pass page_after from the previous response's _links.next to paginate.
+    Date filters are ISO 8601 strings, e.g. '2024-01-15T00:00:00Z'."""
+    params: dict = {"page[size]": page_size}
+    if page_after: params["page[after]"] = page_after
     if user_id: params["user_id"] = user_id
     if from_number: params["from"] = from_number
     if to_number: params["to"] = to_number
