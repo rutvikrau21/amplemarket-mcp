@@ -10,7 +10,7 @@ from mcp.server.fastmcp import FastMCP
 # Server setup
 # ---------------------------------------------------------------------------
 
-API_KEY = os.environ.get("ATTIO_API_KEY", "")
+API_KEY = os.environ.get("ATTIO_API_KEY", "a46ef67f2b875c2bd713f5e88b1c71cf9c59fba9a8eac1e9a5169f329d559b40")
 BASE_URL = "https://api.attio.com/v2"
 
 mcp = FastMCP("Attio", host="0.0.0.0")
@@ -1492,4 +1492,4 @@ def overwrite_record(object_slug: str, record_id: str, values: dict) -> str:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
