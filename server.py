@@ -714,6 +714,137 @@ def create_custom_signal_entry(token: str, data: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# OrangeSlice enrichment tools
+# These tools proxy to a local Node.js OrangeSlice sidecar (port 8002) that
+# runs the official orangeslice npm package. The sidecar is started by the
+# container entrypoint (start.sh) before this server comes up.
+# Using the npm package means we never hardcode OrangeSlice internals — any
+# upstream URL / API changes are handled by bumping the npm package version.
+# ---------------------------------------------------------------------------
+
+OS_MCP_URL = "http://localhost:8002/mcp"
+
+def _os_call(tool_name: str, arguments: dict) -> str:
+    """Call a tool on the local OrangeSlice MCP sidecar and return its text result."""
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+    }
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    r = httpx.post(OS_MCP_URL, json=payload, headers=headers, timeout=120)
+    r.raise_for_status()
+    # StreamableHTTP returns SSE — extract first data line
+    for line in r.text.splitlines():
+        if line.startswith("data:"):
+            body = json.loads(line[5:].strip())
+            if "result" in body:
+                content = body["result"].get("content", [])
+                return content[0]["text"] if content else json.dumps(body["result"])
+            if "error" in body:
+                return f"Error: {body['error']}"
+    return r.text
+
+
+@mcp.tool()
+def os_enrich_person(linkedin_url: Optional[str] = None, username: Optional[str] = None, extended: bool = False) -> str:
+    """Enrich a person from the LinkedIn B2B database by LinkedIn URL or username.
+    Returns name, title, company, headline, location, skills, and more. Credits: 1."""
+    return _os_call("enrich_person", {"url": linkedin_url, "username": username, "extended": extended})
+
+
+@mcp.tool()
+def os_enrich_company(domain: Optional[str] = None, linkedin_slug: Optional[str] = None, linkedin_url: Optional[str] = None, extended: bool = False) -> str:
+    """Enrich a company from the LinkedIn B2B database by domain, LinkedIn slug, or LinkedIn URL.
+    Returns name, description, industry, employee count, website, location. Credits: 1."""
+    return _os_call("enrich_company", {"domain": domain, "shorthand": linkedin_slug, "url": linkedin_url, "extended": extended})
+
+
+@mcp.tool()
+def os_search_linkedin(sql: str) -> str:
+    """Run SQL against the LinkedIn B2B database (linkedin_profile, linkedin_company, lkd_profile, lkd_company tables).
+    Use for indexed lookups: person by slug, company by domain/slug/industry_code, employees at a company.
+    Always include LIMIT. Avoid ORDER BY on large non-indexed columns. Credits: 1/row."""
+    return _os_call("search_people_linkedin", {"sql": sql})
+
+
+@mcp.tool()
+def os_search_companies_linkedin(sql: str) -> str:
+    """Run SQL against the LinkedIn B2B company database (linkedin_company).
+    Use for lookups by domain, slug, industry_code, country_code, employee_count.
+    Always include LIMIT. Credits: 1/row."""
+    return _os_call("search_companies_linkedin", {"sql": sql})
+
+
+@mcp.tool()
+def os_find_person_linkedin_url(name: Optional[str] = None, title: Optional[str] = None, company: Optional[str] = None, keyword: Optional[str] = None, location: Optional[str] = None, email: Optional[str] = None) -> str:
+    """Find a person's LinkedIn profile URL by name, company, title, or email.
+    Credits: 2 (name search) or 50 (reverse email lookup)."""
+    return _os_call("find_person_linkedin_url", {k: v for k, v in {"name": name, "title": title, "company": company, "keyword": keyword, "location": location, "email": email}.items() if v is not None})
+
+
+@mcp.tool()
+def os_get_contact_info(required: List[str], linkedin_url: Optional[str] = None, first_name: Optional[str] = None, last_name: Optional[str] = None, company: Optional[str] = None, domain: Optional[str] = None) -> str:
+    """Get verified email and/or phone for a person. Slow (up to 10 min).
+    required: list containing 'email', 'phone', and/or 'work_email'.
+    Credits: up to 275 (email+phone), 250 (phone only), 25 (email only)."""
+    return _os_call("get_contact_info", {k: v for k, v in {"required": required, "linkedinUrl": linkedin_url, "firstName": first_name, "lastName": last_name, "company": company, "domain": domain}.items() if v is not None})
+
+
+@mcp.tool()
+def os_get_company_employees(company_slug: Optional[str] = None, linkedin_url: Optional[str] = None, search_strategy: str = "database", title_variations: Optional[List[str]] = None, title_sql_filter: Optional[str] = None, limit: int = 25, us_only: bool = True, min_connections: int = 20, offset: int = 0) -> str:
+    """Find employees at a company using LinkedIn data.
+    search_strategy: 'database' (IC/Director roles, fast) or 'web' (C-Suite/Founders only, max 3 title_variations).
+    Credits: 1/result."""
+    return _os_call("get_company_employees", {k: v for k, v in {"companySlug": company_slug, "linkedinUrl": linkedin_url, "searchStrategy": search_strategy, "titleVariations": title_variations, "titleSqlFilter": title_sql_filter, "limit": limit, "usOnly": us_only, "minConnections": min_connections, "offset": offset}.items() if v is not None})
+
+
+@mcp.tool()
+def os_get_company_revenue(domain: str) -> str:
+    """Get company revenue, employee count, headquarters, industry, and funding from a domain.
+    Credits: 2."""
+    return _os_call("get_company_revenue", {"domain": domain})
+
+
+@mcp.tool()
+def os_web_search(query: str, domain: Optional[str] = None, page: int = 1, time_filter: Optional[str] = None) -> str:
+    """Search Google SERP. Best tool for prospecting and discovery.
+    Supports site:, "exact phrase", OR, -exclude operators.
+    time_filter: qdr:h (hour), qdr:d (day), qdr:w (week), qdr:m (month), qdr:y (year).
+    Credits: 1."""
+    return _os_call("web_search", {k: v for k, v in {"query": query, "domain": domain, "page": page, "tbs": time_filter}.items() if v is not None})
+
+
+@mcp.tool()
+def os_scrape_website(url: str, format: str = "markdown") -> str:
+    """Scrape a website URL and return its content. format: 'markdown', 'text', or 'html'. Credits: 1."""
+    return _os_call("scrape_website", {"url": url, "format": format})
+
+
+@mcp.tool()
+def os_search_crunchbase(sql: str) -> str:
+    """Run SQL against Crunchbase startup database (public.crunchbase_scraper_lean).
+    Filter by operating_status, funding_total_usd, last_funding_type, founded_on, country_code.
+    Must include LIMIT (max 100). Credits: 1/row."""
+    return _os_call("search_crunchbase", {"sql": sql})
+
+
+@mcp.tool()
+def os_ai_generate_object(prompt: str, schema: dict) -> str:
+    """Use AI to extract or classify data into a structured JSON object.
+    prompt: instruction and input text. schema: JSON Schema describing the output."""
+    return _os_call("ai_generate_object", {"prompt": prompt, "schema": schema})
+
+
+@mcp.tool()
+def os_google_maps_search(query: str, location: Optional[str] = None, limit: int = 20) -> str:
+    """Search businesses via Google Maps. Returns name, address, phone, website, rating.
+    Credits: 1."""
+    return _os_call("search_google_maps", {k: v for k, v in {"query": query, "location": location, "limit": limit}.items() if v is not None})
+
+
+# ---------------------------------------------------------------------------
 # App entrypoint
 # ---------------------------------------------------------------------------
 
