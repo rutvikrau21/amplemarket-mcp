@@ -1042,6 +1042,451 @@ def create_company(
 
 
 # ---------------------------------------------------------------------------
+# Threads (correct comment API)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def list_threads_for_record(
+    object_slug: str,
+    record_id: str,
+    limit: int = 20,
+) -> str:
+    """
+    List all comment threads on a specific record.
+
+    Args:
+        object_slug: Object type, e.g. 'people', 'companies', 'deals'.
+        record_id: The record UUID.
+        limit: Max results (default 20, max 50).
+    """
+    params: dict[str, Any] = {
+        "object": object_slug,
+        "record_id": record_id,
+        "limit": min(limit, 50),
+    }
+    return json.dumps(_get("/threads", params), indent=2)
+
+
+@mcp.tool()
+def list_threads_for_entry(
+    list_id: str,
+    entry_id: str,
+    limit: int = 20,
+) -> str:
+    """
+    List all comment threads on a specific list entry.
+
+    Args:
+        list_id: The list UUID.
+        entry_id: The list entry UUID.
+        limit: Max results (default 20, max 50).
+    """
+    params: dict[str, Any] = {
+        "list": list_id,
+        "entry_id": entry_id,
+        "limit": min(limit, 50),
+    }
+    return json.dumps(_get("/threads", params), indent=2)
+
+
+@mcp.tool()
+def get_thread(thread_id: str) -> str:
+    """
+    Get a thread with all its comments.
+
+    Args:
+        thread_id: The thread UUID.
+    """
+    return json.dumps(_get(f"/threads/{thread_id}"), indent=2)
+
+
+@mcp.tool()
+def get_comment(comment_id: str) -> str:
+    """
+    Get a single comment by ID.
+
+    Args:
+        comment_id: The comment UUID.
+    """
+    return json.dumps(_get(f"/comments/{comment_id}"), indent=2)
+
+
+@mcp.tool()
+def create_comment_on_record(
+    object_slug: str,
+    record_id: str,
+    content: str,
+    thread_id: Optional[str] = None,
+) -> str:
+    """
+    Create a comment on a record (starts a new thread or replies to existing).
+
+    Args:
+        object_slug: The object type, e.g. 'people', 'companies'.
+        record_id: The record UUID.
+        content: Comment text.
+        thread_id: Reply to an existing thread UUID. If omitted, starts a new thread. Optional.
+    """
+    body: dict[str, Any] = {
+        "data": {
+            "record_id": record_id,
+            "record_object": object_slug,
+            "content": [{"type": "text", "text": content}],
+        }
+    }
+    if thread_id:
+        body["data"]["thread_id"] = thread_id
+    return json.dumps(_post("/comments", body), indent=2)
+
+
+@mcp.tool()
+def delete_comment_by_id(comment_id: str) -> str:
+    """
+    Delete a comment. If it's the first comment in a thread, the entire thread is deleted.
+
+    Args:
+        comment_id: The comment UUID.
+    """
+    return json.dumps(_delete(f"/comments/{comment_id}"), indent=2)
+
+
+# ---------------------------------------------------------------------------
+# SQL queries
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def run_sql(query: str) -> str:
+    """
+    Execute a read-only SQL query against your Attio workspace data.
+
+    This is extremely powerful — you can join across objects, filter by any attribute,
+    aggregate, and alias columns.
+
+    IMPORTANT: Field names must use the format `object.attribute_slug` (not bare column names).
+    Use list_attributes() to discover valid attribute slugs for each object.
+
+    Examples:
+      SELECT people.record_id, people.name FROM people LIMIT 10
+      SELECT companies.record_id, companies.name FROM companies LIMIT 10
+      SELECT people.record_id, people.name, people.email_addresses, people.job_title
+        FROM people WHERE people.name IS NOT NULL LIMIT 20
+      SELECT tasks.task_id, tasks.content_plaintext, tasks.is_completed
+        FROM tasks WHERE tasks.is_completed = false LIMIT 20
+
+    Args:
+        query: A read-only SQL SELECT statement.
+    """
+    body = {"sql": query}
+    return json.dumps(_post("/sql", body), indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Meetings (Beta)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def list_meetings(
+    limit: int = 20,
+    offset: int = 0,
+    record_id: Optional[str] = None,
+    object_slug: Optional[str] = None,
+) -> str:
+    """
+    List meetings recorded in Attio (Beta feature).
+
+    Args:
+        limit: Max results (default 20).
+        offset: Pagination offset (default 0).
+        record_id: Filter by linked record UUID. Optional.
+        object_slug: Object type for record filter, e.g. 'people'. Optional.
+    """
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    if record_id and object_slug:
+        params["record_id"] = record_id
+        params["object"] = object_slug
+    return json.dumps(_get("/meetings", params), indent=2)
+
+
+@mcp.tool()
+def get_meeting(meeting_id: str) -> str:
+    """
+    Get a specific meeting by ID.
+
+    Args:
+        meeting_id: The meeting UUID.
+    """
+    return json.dumps(_get(f"/meetings/{meeting_id}"), indent=2)
+
+
+@mcp.tool()
+def list_call_recordings(meeting_id: str) -> str:
+    """
+    List call recordings for a meeting.
+
+    Args:
+        meeting_id: The meeting UUID.
+    """
+    return json.dumps(_get(f"/meetings/{meeting_id}/call_recordings"), indent=2)
+
+
+@mcp.tool()
+def get_call_recording(meeting_id: str, recording_id: str) -> str:
+    """
+    Get a specific call recording.
+
+    Args:
+        meeting_id: The meeting UUID.
+        recording_id: The recording UUID.
+    """
+    return json.dumps(_get(f"/meetings/{meeting_id}/call_recordings/{recording_id}"), indent=2)
+
+
+@mcp.tool()
+def get_call_transcript(
+    meeting_id: str, recording_id: str, limit: int = 50, cursor: Optional[str] = None
+) -> str:
+    """
+    Get the transcript for a call recording (cursor-paginated segments).
+
+    Args:
+        meeting_id: The meeting UUID.
+        recording_id: The recording UUID.
+        limit: Max transcript segments to return (default 50).
+        cursor: Pagination cursor from a previous response. Optional.
+    """
+    params: dict[str, Any] = {"limit": limit}
+    if cursor:
+        params["cursor"] = cursor
+    return json.dumps(
+        _get(f"/meetings/{meeting_id}/call_recordings/{recording_id}/transcript", params),
+        indent=2,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Object / attribute schema management
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def create_object(api_slug: str, singular_noun: str, plural_noun: str) -> str:
+    """
+    Create a custom object type in the workspace.
+
+    Args:
+        api_slug: URL-safe identifier, e.g. 'vendors'. Must be lowercase with underscores.
+        singular_noun: Human-readable singular name, e.g. 'Vendor'.
+        plural_noun: Human-readable plural name, e.g. 'Vendors'.
+    """
+    body = {
+        "data": {
+            "api_slug": api_slug,
+            "singular_noun": singular_noun,
+            "plural_noun": plural_noun,
+        }
+    }
+    return json.dumps(_post("/objects", body), indent=2)
+
+
+@mcp.tool()
+def update_object(object_slug: str, singular_noun: Optional[str] = None, plural_noun: Optional[str] = None) -> str:
+    """
+    Update a custom object's display name.
+
+    Args:
+        object_slug: The object's API slug.
+        singular_noun: New singular name. Optional.
+        plural_noun: New plural name. Optional.
+    """
+    data: dict[str, Any] = {}
+    if singular_noun is not None:
+        data["singular_noun"] = singular_noun
+    if plural_noun is not None:
+        data["plural_noun"] = plural_noun
+    return json.dumps(_patch(f"/objects/{object_slug}", {"data": data}), indent=2)
+
+
+@mcp.tool()
+def create_attribute(
+    object_slug: str,
+    api_slug: str,
+    title: str,
+    attribute_type: str,
+    is_required: bool = False,
+    is_unique: bool = False,
+    config: Optional[dict] = None,
+) -> str:
+    """
+    Create a new attribute on an object type.
+
+    Args:
+        object_slug: The object to add the attribute to, e.g. 'people'.
+        api_slug: URL-safe attribute identifier, e.g. 'contract_value'.
+        title: Display name, e.g. 'Contract Value'.
+        attribute_type: One of: text, number, checkbox, currency, date, timestamp, location,
+                        rating, status, select, multi_select, record_reference, actor_reference,
+                        email_address, phone_number, domain, interaction.
+        is_required: Whether the attribute is required on all records (default false).
+        is_unique: Whether values must be unique across all records (default false).
+        config: Additional type-specific config dict. Optional.
+                For currency: {"currency_code": "USD"}
+                For record_reference: {"relationship": {"target_object": "companies"}}
+    """
+    data: dict[str, Any] = {
+        "api_slug": api_slug,
+        "title": title,
+        "type": attribute_type,
+        "is_required": is_required,
+        "is_unique": is_unique,
+    }
+    if config:
+        data.update(config)
+    return json.dumps(_post(f"/objects/{object_slug}/attributes", {"data": data}), indent=2)
+
+
+@mcp.tool()
+def update_attribute(
+    object_slug: str,
+    attribute_slug: str,
+    title: Optional[str] = None,
+    is_required: Optional[bool] = None,
+) -> str:
+    """
+    Update an attribute's title or required flag.
+
+    Args:
+        object_slug: The object the attribute belongs to, e.g. 'people'.
+        attribute_slug: The attribute's API slug.
+        title: New display name. Optional.
+        is_required: New required flag. Optional.
+    """
+    data: dict[str, Any] = {}
+    if title is not None:
+        data["title"] = title
+    if is_required is not None:
+        data["is_required"] = is_required
+    return json.dumps(_patch(f"/objects/{object_slug}/attributes/{attribute_slug}", {"data": data}), indent=2)
+
+
+@mcp.tool()
+def create_select_option(object_slug: str, attribute_slug: str, title: str, color: Optional[str] = None) -> str:
+    """
+    Add a new option to a select or multi-select attribute.
+
+    Args:
+        object_slug: The object the attribute belongs to.
+        attribute_slug: The select attribute slug.
+        title: Option display name.
+        color: Optional color name, e.g. 'red', 'green', 'blue', 'yellow', 'purple'.
+    """
+    data: dict[str, Any] = {"title": title}
+    if color:
+        data["color"] = color
+    return json.dumps(
+        _post(f"/objects/{object_slug}/attributes/{attribute_slug}/options", {"data": data}),
+        indent=2,
+    )
+
+
+@mcp.tool()
+def create_status(object_slug: str, attribute_slug: str, title: str, color: Optional[str] = None) -> str:
+    """
+    Add a new status option to a status-type attribute.
+
+    Args:
+        object_slug: The object the attribute belongs to.
+        attribute_slug: The status attribute slug.
+        title: Status display name.
+        color: Optional color name.
+    """
+    data: dict[str, Any] = {"title": title}
+    if color:
+        data["color"] = color
+    return json.dumps(
+        _post(f"/objects/{object_slug}/attributes/{attribute_slug}/statuses", {"data": data}),
+        indent=2,
+    )
+
+
+
+# ---------------------------------------------------------------------------
+# Record entries (list memberships for a given record)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def get_record_list_entries(object_slug: str, record_id: str) -> str:
+    """
+    Get all list entries (list memberships) for a specific record.
+
+    Useful for finding which lists a person or company belongs to.
+
+    Args:
+        object_slug: The object type, e.g. 'people', 'companies'.
+        record_id: The record UUID.
+    """
+    return json.dumps(_get(f"/objects/{object_slug}/records/{record_id}/entries"), indent=2)
+
+
+# ---------------------------------------------------------------------------
+# List entry upsert
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def upsert_list_entry(list_id: str, record_id: str, object_slug: str, entry_values: Optional[dict] = None) -> str:
+    """
+    Add a record to a list, or update its entry if it already exists (upsert by parent record).
+
+    Args:
+        list_id: The list UUID.
+        record_id: The record UUID to add/update.
+        object_slug: The object type of the record, e.g. 'companies', 'people'.
+        entry_values: Dict of list-entry attribute values. Optional.
+    """
+    data: dict[str, Any] = {
+        "parent_record_id": record_id,
+        "parent_object": object_slug,
+    }
+    if entry_values:
+        data["entry_values"] = entry_values
+    return json.dumps(_put(f"/lists/{list_id}/entries", {"data": data}), indent=2)
+
+
+@mcp.tool()
+def overwrite_list_entry(list_id: str, entry_id: str, entry_values: dict) -> str:
+    """
+    Overwrite all values for a list entry (PUT — replaces multi-select values entirely).
+    Use update_list_entry (PATCH) to append to multi-selects instead.
+
+    Args:
+        list_id: The list UUID.
+        entry_id: The entry UUID.
+        entry_values: Dict of list-entry attribute values.
+    """
+    body = {"data": {"entry_values": entry_values}}
+    return json.dumps(_put(f"/lists/{list_id}/entries/{entry_id}", body), indent=2)
+
+
+@mcp.tool()
+def overwrite_record(object_slug: str, record_id: str, values: dict) -> str:
+    """
+    Overwrite attribute values on a record (PUT — replaces multi-select values entirely).
+    Use update_record (PATCH) to append to multi-selects instead.
+
+    Args:
+        object_slug: e.g. 'people', 'companies', 'deals'.
+        record_id: The record UUID.
+        values: Dict of attribute values (same format as create_record values).
+    """
+    body = {"data": {"values": values}}
+    return json.dumps(_put(f"/objects/{object_slug}/records/{record_id}", body), indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
