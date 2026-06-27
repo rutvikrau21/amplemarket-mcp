@@ -1487,6 +1487,228 @@ def overwrite_record(object_slug: str, record_id: str, values: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Email-workflow tools
+#
+# Attio's REST API does NOT expose email bodies or subjects — synced emails
+# are only available in-product. What IS available:
+#   • interaction attributes on records (last_email_interaction, last_interaction)
+#     → gives you timestamp + which workspace member's mailbox was involved
+#   • email addresses on person/company records → use these to search Gmail
+#
+# The three tools below are designed to power the full workflow:
+#   1. query_interaction_batch  — last-email metadata for N records in 1 call
+#   2. get_deal_contacts        — deal → people + companies with email addresses
+#   3. write_email_summary_note — write a Gmail-sourced summary back to a record
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def query_interaction_batch(
+    object_slug: str,
+    record_ids: list,
+) -> str:
+    """
+    Get last-interaction metadata for a batch of records in a single API call.
+
+    Returns a slim array: [{record_id, name, last_interaction_at, last_interaction_type,
+    last_email_interaction_at, owner_actor_id, owner_actor_type}, ...]
+
+    Uses a single POST /records/query with $in filter — collapses N sequential
+    get_record() calls into one round-trip.
+
+    Note: Attio's interaction attributes give you WHEN and WHOSE MAILBOX the last
+    email ran through, but NOT the email subject or body (those are not exposed by
+    the API). Use get_deal_contacts to get email addresses, then search Gmail for
+    actual message content.
+
+    Args:
+        object_slug: e.g. 'people', 'companies', 'deals'.
+        record_ids: List of record UUID strings (up to 500).
+    """
+    body: dict[str, Any] = {
+        "filter": {"record_id": {"$in": record_ids}},
+        "limit": min(len(record_ids), 500),
+        "offset": 0,
+    }
+    raw = _post(f"/objects/{object_slug}/records/query", body)
+
+    results = []
+    for record in raw.get("data", []):
+        rid = record.get("id", {}).get("record_id")
+        values = record.get("values", {})
+
+        # Extract name
+        name = None
+        name_vals = values.get("name", [])
+        if name_vals:
+            name = name_vals[0].get("full_name") or name_vals[0].get("value")
+
+        # Extract last_interaction (any type)
+        last_interaction_at = None
+        last_interaction_type = None
+        li_vals = values.get("last_interaction", [])
+        if li_vals:
+            li = li_vals[0]
+            last_interaction_at = li.get("interacted_at")
+            last_interaction_type = li.get("type")
+
+        # Extract last_email_interaction specifically
+        last_email_at = None
+        lei_vals = values.get("last_email_interaction", [])
+        if lei_vals:
+            last_email_at = lei_vals[0].get("interacted_at")
+
+        # Extract owner actor from last_interaction
+        owner_actor_id = None
+        owner_actor_type = None
+        if li_vals:
+            actor = li_vals[0].get("owner_actor", {})
+            owner_actor_id = actor.get("id")
+            owner_actor_type = actor.get("type")
+
+        results.append({
+            "record_id": rid,
+            "name": name,
+            "last_interaction_at": last_interaction_at,
+            "last_interaction_type": last_interaction_type,
+            "last_email_interaction_at": last_email_at,
+            "owner_actor_id": owner_actor_id,
+            "owner_actor_type": owner_actor_type,
+        })
+
+    return json.dumps(results, indent=2)
+
+
+@mcp.tool()
+def get_deal_contacts(deal_id: str) -> str:
+    """
+    Given a deal ID, return all associated people and companies with their
+    email addresses, phone numbers, and domains.
+
+    This is the bridge between a deal and Gmail: take the returned email
+    addresses and use them to search Gmail for email threads.
+
+    Returns:
+        {
+          "deal": {id, name},
+          "people": [{id, name, email_addresses: [...], job_title}],
+          "companies": [{id, name, domains: [...], email_addresses: [...]}]
+        }
+
+    Args:
+        deal_id: The deal record UUID.
+    """
+    deal = _get(f"/objects/deals/records/{deal_id}")
+    deal_values = deal.get("data", deal).get("values", {})
+
+    # Extract deal name
+    deal_name = None
+    for v in deal_values.get("name", []):
+        deal_name = v.get("value") or v.get("full_name")
+        if deal_name:
+            break
+
+    people_out: list[dict] = []
+    companies_out: list[dict] = []
+
+    # Collect referenced person IDs
+    person_ids = [
+        ref["target_record_id"]
+        for ref in deal_values.get("people", [])
+        if ref.get("target_record_id")
+    ]
+    # Collect referenced company IDs
+    company_ids = [
+        ref["target_record_id"]
+        for ref in deal_values.get("associated_company", [])
+        if ref.get("target_record_id")
+    ]
+    # Also check generic 'companies' reference attribute name
+    company_ids += [
+        ref["target_record_id"]
+        for ref in deal_values.get("companies", [])
+        if ref.get("target_record_id")
+    ]
+
+    # Batch-fetch people
+    if person_ids:
+        people_resp = _post("/objects/people/records/query", {
+            "filter": {"record_id": {"$in": person_ids}},
+            "limit": len(person_ids),
+        })
+        for p in people_resp.get("data", []):
+            pid = p.get("id", {}).get("record_id")
+            pv = p.get("values", {})
+            name = None
+            for v in pv.get("name", []):
+                name = v.get("full_name") or v.get("value")
+                if name:
+                    break
+            emails = [v.get("email_address") for v in pv.get("email_addresses", []) if v.get("email_address")]
+            job_title = next((v.get("value") for v in pv.get("job_title", []) if v.get("value")), None)
+            people_out.append({"id": pid, "name": name, "email_addresses": emails, "job_title": job_title})
+
+    # Batch-fetch companies
+    seen_company_ids = list(dict.fromkeys(company_ids))  # dedupe
+    if seen_company_ids:
+        cos_resp = _post("/objects/companies/records/query", {
+            "filter": {"record_id": {"$in": seen_company_ids}},
+            "limit": len(seen_company_ids),
+        })
+        for c in cos_resp.get("data", []):
+            cid = c.get("id", {}).get("record_id")
+            cv = c.get("values", {})
+            name = next((v.get("value") for v in cv.get("name", []) if v.get("value")), None)
+            domains = [v.get("domain") for v in cv.get("domains", []) if v.get("domain")]
+            emails = [v.get("email_address") for v in cv.get("email_addresses", []) if v.get("email_address")]
+            companies_out.append({"id": cid, "name": name, "domains": domains, "email_addresses": emails})
+
+    return json.dumps({
+        "deal": {"id": deal_id, "name": deal_name},
+        "people": people_out,
+        "companies": companies_out,
+    }, indent=2)
+
+
+@mcp.tool()
+def write_email_summary_note(
+    object_slug: str,
+    record_id: str,
+    summary: str,
+    sourced_from: str = "Gmail",
+) -> str:
+    """
+    Write an email-thread summary as a note on a deal, company, or person record.
+
+    Use this after pulling email threads from Gmail and summarising them —
+    it writes the summary back to Attio so it's visible on the record.
+
+    The note title is auto-generated as "Email Summary (YYYY-MM-DD)" and the
+    content is formatted as markdown.
+
+    Args:
+        object_slug: The object type, e.g. 'deals', 'companies', 'people'.
+        record_id: The record UUID to attach the note to.
+        summary: The email thread summary text (markdown supported).
+        sourced_from: Label for where the summary came from (default 'Gmail').
+    """
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    title = f"Email Summary ({today})"
+    content = f"*Sourced from {sourced_from} — {today}*\n\n{summary}"
+    body: dict[str, Any] = {
+        "data": {
+            "parent_object": object_slug,
+            "parent_record_id": record_id,
+            "title": title,
+            "content": content,
+            "format": "markdown",
+        }
+    }
+    return json.dumps(_post("/notes", body), indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
