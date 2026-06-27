@@ -723,16 +723,36 @@ def create_custom_signal_entry(token: str, data: dict) -> str:
 # ---------------------------------------------------------------------------
 
 OS_MCP_URL = "http://localhost:8002/mcp"
+_os_session_id: Optional[str] = None
+
+def _os_get_session() -> str:
+    """Initialize a session with the OrangeSlice sidecar and cache the session ID."""
+    global _os_session_id
+    if _os_session_id:
+        return _os_session_id
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    r = httpx.post(OS_MCP_URL, json={
+        "jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "amplemarket-proxy", "version": "1"}}
+    }, headers=headers, timeout=15)
+    r.raise_for_status()
+    _os_session_id = r.headers.get("mcp-session-id", "")
+    return _os_session_id
 
 def _os_call(tool_name: str, arguments: dict) -> str:
     """Call a tool on the local OrangeSlice MCP sidecar and return its text result."""
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {"name": tool_name, "arguments": arguments},
+    # Strip None values — sidecar Zod schemas reject null for optional string fields
+    clean_args = {k: v for k, v in arguments.items() if v is not None}
+    session_id = _os_get_session()
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "mcp-session-id": session_id,
     }
-    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    payload = {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": tool_name, "arguments": clean_args},
+    }
     r = httpx.post(OS_MCP_URL, json=payload, headers=headers, timeout=120)
     r.raise_for_status()
     # StreamableHTTP returns SSE — extract first data line
