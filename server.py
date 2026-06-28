@@ -1,12 +1,12 @@
 """
-August MCPs — Single FastMCP server exposing three services:
+August MCPs — Single FastMCP server exposing four services:
   • Amplemarket  (amplemarket_*) — sales outreach, enrichment, sequences, contacts
   • OrangeSlice  (orangeslice_*) — LinkedIn B2B DB, contact info, web search, Crunchbase, AI gen
   • Attio        (attio_*)       — full CRM: records, notes, tasks, lists, webhooks, SQL, meetings
+  • August       (august_*)      — legal AI platform: projects, search, folders, files, Genius Mode queries
 
 All tools are prefixed with their service name so any MCP client or LLM can
-route "use the amplemarket tools" / "use the orangeslice tools" / "use the attio tools"
-without ambiguity.
+route to the right service without ambiguity.
 """
 import os, json
 from typing import Any, Optional, List
@@ -1551,6 +1551,157 @@ def attio_create_status(object_slug: str, attribute_slug: str, title: str, color
     return json.dumps(_at_post(
         f"/objects/{object_slug}/attributes/{attribute_slug}/statuses", {"data": data}
     ), indent=2)
+
+
+# ===========================================================================
+# AUGUST PLATFORM
+# Base URL: https://api.august.law  |  Bearer token auth
+# Legal document intelligence, Genius Mode queries, project & folder management
+# ===========================================================================
+
+AUG_BASE_URL = os.environ.get("AUGUST_BASE_URL", "https://api.august.law")
+AUG_API_KEY = os.environ.get("AUGUST_API_KEY", "")
+
+def _aug_headers():
+    if not AUG_API_KEY:
+        raise RuntimeError("AUGUST_API_KEY not set.")
+    return {"Authorization": f"Bearer {AUG_API_KEY}", "Content-Type": "application/json"}
+
+def _aug_get(path, params=None):
+    r = httpx.get(f"{AUG_BASE_URL}{path}", headers=_aug_headers(), params=params, timeout=60)
+    r.raise_for_status(); return r.json()
+
+def _aug_post(path, body=None):
+    r = httpx.post(f"{AUG_BASE_URL}{path}", headers=_aug_headers(), json=body or {}, timeout=120)
+    r.raise_for_status(); return r.json()
+
+
+# ── Projects ────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def august_list_projects() -> str:
+    """[August Platform] List all projects the authenticated user has access to.
+    Projects are the top-level organizational unit in August — each represents
+    a matter, deal, or workstream containing folders, files, and queries.
+    Use this first to discover project IDs needed by other tools."""
+    return json.dumps(_aug_get("/api/v1/projects"), indent=2)
+
+@mcp.tool()
+def august_list_project_members(project_id: str) -> str:
+    """[August Platform] List all members of a specific project.
+    Returns each member's id, name, email, and role within the project.
+    Useful for understanding who has access and their permissions."""
+    return json.dumps(_aug_get(f"/api/v1/projects/{project_id}/members"), indent=2)
+
+
+# ── Search ──────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def august_global_search(q: str, offset: int = 0, limit: int = 50) -> str:
+    """[August Platform] Full-text search across ALL accessible projects.
+    Searches file names, document content, and metadata globally.
+    Returns matching files, folders, and documents with relevance scores and snippets.
+    Use this when you don't know which project contains the information."""
+    return json.dumps(_aug_get("/api/v1/search", {"q": q, "offset": offset, "limit": limit}), indent=2)
+
+@mcp.tool()
+def august_project_search(project_id: str, q: str, offset: int = 0, limit: int = 50) -> str:
+    """[August Platform] Full-text search within a specific project's documents and files.
+    More targeted than global search — scoped to a single project.
+    Returns matching items with relevance scores, snippets, and folder paths."""
+    return json.dumps(_aug_get(f"/api/v1/projects/{project_id}/search", {"q": q, "offset": offset, "limit": limit}), indent=2)
+
+
+# ── Folders ─────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def august_get_folder_contents(folder_id: str, offset: int = 0, limit: int = 100) -> str:
+    """[August Platform] Get the contents (files and subfolders) of a specific folder.
+    Returns a paginated list of items with their names, types (file/folder),
+    sizes, and timestamps. Use this to browse the folder hierarchy."""
+    return json.dumps(_aug_get(f"/api/v1/folders/{folder_id}/contents", {"offset": offset, "limit": limit}), indent=2)
+
+@mcp.tool()
+def august_get_folder_tree(folder_id: str) -> str:
+    """[August Platform] Get the full recursive folder tree starting from a specific folder.
+    Returns the complete hierarchy of subfolders and files as a nested tree structure.
+    Useful for understanding the full organizational structure of a project's documents."""
+    return json.dumps(_aug_get(f"/api/v1/folders/{folder_id}/tree"), indent=2)
+
+
+# ── Files ───────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def august_get_file_download_urls(doc_ids: List[str], use_pdf: bool = False, ttl: int = 3600, project_id: Optional[str] = None) -> str:
+    """[August Platform] Generate presigned download URLs for one or more files.
+    Pass a list of document IDs to get time-limited download links.
+    Set use_pdf=True to convert documents to PDF format on download.
+    TTL controls how long the URLs remain valid (default 3600 seconds = 1 hour).
+    Returns URLs with expiration timestamps and original filenames."""
+    body: dict[str, Any] = {"doc_ids": doc_ids, "use_pdf": use_pdf, "ttl": ttl}
+    if project_id:
+        body["project_id"] = project_id
+    return json.dumps(_aug_post("/api/v1/files/download", body), indent=2)
+
+
+# ── Genius Mode Queries ─────────────────────────────────────────────────────
+
+@mcp.tool()
+def august_submit_query(
+    query: str,
+    project_id: Optional[str] = None,
+    folder_ids: Optional[List[str]] = None,
+    file_ids: Optional[List[str]] = None,
+    mode: str = "research"
+) -> str:
+    """[August Platform] Submit a Genius Mode query for legal research or document analysis.
+    This is August's most powerful capability — it processes natural language questions
+    against your documents using AI.
+
+    IMPORTANT: Queries are processed ASYNCHRONOUSLY. This tool returns a query_id
+    immediately. You must then poll with august_get_query_status until status is
+    'completed', then retrieve results with august_get_query_result.
+
+    Modes:
+      - 'research': Deep legal research across documents (default)
+      - 'analysis': Structured analysis of specific documents
+      - 'draft': Draft new content based on document context
+      - 'review': Review and annotate documents
+
+    Scope the query by providing project_id, folder_ids, and/or file_ids.
+    Without scope, it searches across all accessible documents."""
+    body: dict[str, Any] = {"query": query, "mode": mode}
+    if project_id:
+        body["project_id"] = project_id
+    if folder_ids:
+        body["folder_ids"] = folder_ids
+    if file_ids:
+        body["file_ids"] = file_ids
+    return json.dumps(_aug_post("/api/v1/queries", body), indent=2)
+
+@mcp.tool()
+def august_get_query_status(query_id: str) -> str:
+    """[August Platform] Poll the processing status of a submitted Genius Mode query.
+    Status values: 'pending', 'processing', 'completed', 'failed'.
+    Also returns a progress indicator (0-1) during processing.
+    Call this repeatedly until status is 'completed' before fetching results."""
+    return json.dumps(_aug_get(f"/api/v1/queries/{query_id}/status"), indent=2)
+
+@mcp.tool()
+def august_get_query_result(query_id: str) -> str:
+    """[August Platform] Retrieve the completed result of a Genius Mode query.
+    Only call this after august_get_query_status returns 'completed'.
+    Returns the AI-generated answer, source documents, and citations
+    with references back to specific documents and passages."""
+    return json.dumps(_aug_get(f"/api/v1/queries/{query_id}/result"), indent=2)
+
+@mcp.tool()
+def august_get_query_files(query_id: str) -> str:
+    """[August Platform] Retrieve files generated by a completed Genius Mode query.
+    Some query modes produce work products (presentations, spreadsheets, reports).
+    This returns the list of generated files with their IDs, names, types, and sizes.
+    Use august_get_file_download_urls with the file IDs to download them."""
+    return json.dumps(_aug_get(f"/api/v1/queries/{query_id}/files"), indent=2)
 
 
 # ===========================================================================
